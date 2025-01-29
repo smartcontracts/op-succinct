@@ -1,0 +1,20 @@
+[package]
+name = "op-fp-proposer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# alloy
+alloy = { version = "0.9" , features = ["full"]}
+
+# op-alloy
+op-alloy-network = { version = "0.9", default-features = false }
+
+# general
+anyhow.workspace = true
+dotenv.workspace = true
+log.workspace = true
+tokio.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json.workspace = true
+tracing.workspace = true
