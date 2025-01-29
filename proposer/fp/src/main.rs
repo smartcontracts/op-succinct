@@ -153,7 +153,10 @@ impl OPSuccicntProposer {
             .on_http(self.l1_rpc.clone());
         let contract = DisputeGameFactory::new(self.factory_address, provider.clone());
 
-        let last_game = contract.gameAtIndex(self.fetch_last_game_index().await?).call().await?;
+        let last_game = contract
+            .gameAtIndex(self.fetch_last_game_index().await?)
+            .call()
+            .await?;
 
         let last_game_address = last_game.proxy;
         tracing::info!("Last game proxy: {:?}", last_game_address);
