@@ -1,6 +1,4 @@
-
 use alloy::{
-    sol_types::SolValue,
     consensus::Header,
     eips::BlockNumberOrTag,
     network::Ethereum,
@@ -14,6 +12,7 @@ use alloy::{
     },
     signers::local::PrivateKeySigner,
     sol,
+    sol_types::SolValue,
     transports::http::{reqwest::Url, Client, Http},
 };
 // use alloy_sol_types::{sol_data::Uint, SolType};
@@ -114,14 +113,16 @@ impl OPSuccicntProposer {
     }
 
     async fn fetch_last_game_index(&self) -> Result<U256> {
-        let l1_provider: RootProvider<Http<Client>> = ProviderBuilder::default().on_http(self.l1_rpc.clone());
+        let l1_provider: RootProvider<Http<Client>> =
+            ProviderBuilder::default().on_http(self.l1_rpc.clone());
         let factory = DisputeGameFactory::new(self.factory_address, l1_provider.clone());
         let game_count = factory.gameCount().call().await?;
         Ok(game_count.gameCount_ - U256::from(1))
     }
 
     async fn fetch_init_bond(&self) -> Result<U256> {
-        let l1_provider: RootProvider<Http<Client>> = ProviderBuilder::default().on_http(self.l1_rpc.clone());
+        let l1_provider: RootProvider<Http<Client>> =
+            ProviderBuilder::default().on_http(self.l1_rpc.clone());
         let factory = DisputeGameFactory::new(self.factory_address, l1_provider.clone());
         let init_bond = factory.initBonds(self.game_type.into()).call().await?;
         Ok(init_bond._0)
@@ -144,8 +145,7 @@ impl OPSuccicntProposer {
         const TIMEOUT_SECONDS: u64 = 60;
 
         let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY not set");
-        let signer: PrivateKeySigner =
-            private_key.parse().expect("Failed to parse private key");
+        let signer: PrivateKeySigner = private_key.parse().expect("Failed to parse private key");
         let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new()
             .with_recommended_fillers()
@@ -160,8 +160,7 @@ impl OPSuccicntProposer {
 
         let last_game_address = last_game.proxy;
         tracing::info!("Last game proxy: {:?}", last_game_address);
-        let last_game_proxy =
-            OPSuccinctFaultDisputeGame::new(last_game_address, provider.clone());
+        let last_game_proxy = OPSuccinctFaultDisputeGame::new(last_game_address, provider.clone());
         let last_game_l2_block_number =
             last_game_proxy.l2BlockNumber().call().await?.l2BlockNumber_;
         tracing::info!("Last game l2 block number: {:?}", last_game_l2_block_number);
@@ -169,8 +168,7 @@ impl OPSuccicntProposer {
         let l2_block_number =
             last_game_l2_block_number + U256::from(self.proposal_interval_in_blocks);
         let last_game_index_u32 = last_game_index_u256.to::<u32>();
-        let extra_data =
-            <(U256, u32)>::abi_encode_packed(&(l2_block_number, last_game_index_u32));
+        let extra_data = <(U256, u32)>::abi_encode_packed(&(l2_block_number, last_game_index_u32));
 
         let receipt = contract
             .create(self.game_type.into(), B256::ZERO, extra_data.into())
