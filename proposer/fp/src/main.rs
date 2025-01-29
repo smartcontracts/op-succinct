@@ -50,7 +50,28 @@ sol! {
     #[sol(rpc)]
     contract OPSuccinctFaultDisputeGame {
         function l2BlockNumber() public pure returns (uint256 l2BlockNumber_);
+        function rootClaim() public pure returns (Claim rootClaim_);
     }
+}
+
+pub async fn fetch_output_root_at_block(l2_node_rpc: Url, l2_block_number: U256) -> Result<B256> {
+    let l2_node_provider: RootProvider<Http<Client>, Optimism> =
+        ProviderBuilder::default().on_http(l2_node_rpc.clone());
+    let output_root: serde_json::Value = l2_node_provider
+        .raw_request(
+            "optimism_outputAtBlock".into(),
+            vec![serde_json::json!(format!("0x{:x}", l2_block_number))],
+        )
+        .await?;
+
+    // The output is likely nested in the JSON response
+    // Extract the output root string from the response
+    let output_root_str = output_root["outputRoot"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get outputRoot string"))?;
+
+    // Parse the hex string into B256
+    Ok(output_root_str.parse()?)
 }
 
 struct OPSuccicntProposer {
@@ -59,7 +80,7 @@ struct OPSuccicntProposer {
     l2_node_rpc: Url,
     wallet: EthereumWallet,
     factory_address: Address,
-    last_proposed_block_number: u64,
+    last_valid_proposal_block_number: u64,
     proposal_interval_in_blocks: u64,
     fetch_interval: u64,
     game_type: u32,
@@ -70,25 +91,61 @@ impl OPSuccicntProposer {
         let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY not set");
         let signer: PrivateKeySigner = private_key.parse().expect("Failed to parse private key");
 
+        let l1_rpc = env::var("L1_RPC")
+            .expect("L1_RPC must be set")
+            .parse::<Url>()
+            .unwrap();
+
+        let l2_node_rpc = env::var("L2_NODE_RPC")
+            .expect("L2_NODE_RPC must be set")
+            .parse::<Url>()
+            .unwrap();
+
+        // Get last proposed block number
+        // Go through a while loop to get the last proposed block number
+        // Start from the last game and walk back until game's output root is same as the last game's claim
+        let provider: RootProvider<Http<Client>> =
+            ProviderBuilder::default().on_http(l1_rpc.clone());
+        let factory_address = env::var("FACTORY_ADDRESS")
+            .expect("FACTORY_ADDRESS must be set")
+            .parse::<Address>()
+            .unwrap();
+        let factory = DisputeGameFactory::new(factory_address, provider.clone());
+        let mut game_index = factory.gameCount().call().await?.gameCount_ - U256::from(1);
+        let mut block_number: U256;
+        loop {
+            let game_address = factory.gameAtIndex(game_index).call().await?.proxy;
+            let game: OPSuccinctFaultDisputeGame::OPSuccinctFaultDisputeGameInstance<
+                Http<Client>,
+                RootProvider<Http<Client>>,
+            > = OPSuccinctFaultDisputeGame::new(game_address, provider.clone());
+            block_number = game.l2BlockNumber().call().await?.l2BlockNumber_;
+            tracing::info!("Checking if proposal for block {:?} is valid", block_number);
+            let game_claim = game.rootClaim().call().await?.rootClaim_;
+
+            let output_root = fetch_output_root_at_block(l2_node_rpc.clone(), block_number).await?;
+
+            if output_root == game_claim {
+                break;
+            }
+            game_index -= U256::from(1);
+        }
+
+        tracing::info!("Last valid proposal block number: {:?}", block_number);
+
         Ok(Self {
-            l1_rpc: env::var("L1_RPC")
-                .expect("L1_RPC must be set")
-                .parse::<Url>()
-                .unwrap(),
+            l1_rpc,
             l2_rpc: env::var("L2_RPC")
                 .expect("L2_RPC must be set")
                 .parse::<Url>()
                 .unwrap(),
-            l2_node_rpc: env::var("L2_NODE_RPC")
-                .expect("L2_NODE_RPC must be set")
-                .parse::<Url>()
-                .unwrap(),
+            l2_node_rpc,
             wallet: EthereumWallet::from(signer),
             factory_address: env::var("FACTORY_ADDRESS")
                 .expect("FACTORY_ADDRESS must be set")
                 .parse::<Address>()
                 .unwrap(),
-            last_proposed_block_number: 0,
+            last_valid_proposal_block_number: block_number.to::<u64>(),
             proposal_interval_in_blocks: env::var("PROPOSAL_INTERVAL_IN_BLOCKS")
                 .unwrap_or("1000".to_string())
                 .parse::<u64>()
@@ -134,18 +191,6 @@ impl OPSuccicntProposer {
         Ok(init_bond._0)
     }
 
-    async fn fetch_output_root_at_block(&self, l2_block_number: U256) -> Result<B256> {
-        let l2_node_provider: RootProvider<Http<Client>, Optimism> =
-            ProviderBuilder::default().on_http(self.l2_node_rpc.clone());
-        let output_root = l2_node_provider
-            .raw_request(
-                "optimism_outputAtBlock".into(),
-                vec![serde_json::json!(format!("0x{:x}", l2_block_number))],
-            )
-            .await?;
-        Ok(output_root)
-    }
-
     async fn fetch_l2_block_number(&self) -> Result<U256> {
         let provider = ProviderBuilder::new()
             .with_recommended_fillers()
@@ -161,12 +206,15 @@ impl OPSuccicntProposer {
         let last_game_address = last_game.proxy;
         tracing::info!("Last game proxy: {:?}", last_game_address);
         let last_game_proxy = OPSuccinctFaultDisputeGame::new(last_game_address, provider.clone());
-        let last_game_l2_block_number =
+        let last_valid_proposal_block_number =
             last_game_proxy.l2BlockNumber().call().await?.l2BlockNumber_;
-        tracing::info!("Last game l2 block number: {:?}", last_game_l2_block_number);
+        tracing::info!(
+            "Last game l2 block number: {:?}",
+            last_valid_proposal_block_number
+        );
 
         let l2_block_number =
-            last_game_l2_block_number + U256::from(self.proposal_interval_in_blocks);
+            last_valid_proposal_block_number + U256::from(self.proposal_interval_in_blocks);
         Ok(l2_block_number)
     }
 
@@ -211,10 +259,10 @@ impl OPSuccicntProposer {
             tracing::info!("Safe L2 head block number: {:?}", safe_l2_head_block_number);
 
             if safe_l2_head_block_number
-                > self.last_proposed_block_number + self.proposal_interval_in_blocks
+                > self.last_valid_proposal_block_number + self.proposal_interval_in_blocks
             {
                 self.create_game().await?;
-                self.last_proposed_block_number += self.proposal_interval_in_blocks;
+                self.last_valid_proposal_block_number += self.proposal_interval_in_blocks;
             }
         }
 
