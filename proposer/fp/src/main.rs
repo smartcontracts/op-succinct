@@ -57,6 +57,7 @@ struct OPSuccicntProposer {
     l1_rpc: Url,
     l2_rpc: Url,
     l2_node_rpc: Url,
+    wallet: EthereumWallet,
     factory_address: Address,
     last_proposed_block_number: u64,
     proposal_interval_in_blocks: u64,
@@ -66,6 +67,9 @@ struct OPSuccicntProposer {
 
 impl OPSuccicntProposer {
     pub async fn new() -> Result<Self> {
+        let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY not set");
+        let signer: PrivateKeySigner = private_key.parse().expect("Failed to parse private key");
+
         Ok(Self {
             l1_rpc: env::var("L1_RPC")
                 .expect("L1_RPC must be set")
@@ -79,6 +83,7 @@ impl OPSuccicntProposer {
                 .expect("L2_NODE_RPC must be set")
                 .parse::<Url>()
                 .unwrap(),
+            wallet: EthereumWallet::from(signer),
             factory_address: env::var("FACTORY_ADDRESS")
                 .expect("FACTORY_ADDRESS must be set")
                 .parse::<Address>()
@@ -117,7 +122,8 @@ impl OPSuccicntProposer {
             ProviderBuilder::default().on_http(self.l1_rpc.clone());
         let factory = DisputeGameFactory::new(self.factory_address, l1_provider.clone());
         let game_count = factory.gameCount().call().await?;
-        Ok(game_count.gameCount_ - U256::from(1))
+        let last_game_index = game_count.gameCount_ - U256::from(1);
+        Ok(last_game_index)
     }
 
     async fn fetch_init_bond(&self) -> Result<U256> {
@@ -140,23 +146,14 @@ impl OPSuccicntProposer {
         Ok(output_root)
     }
 
-    async fn create_game(&self) -> Result<()> {
-        const NUM_CONFIRMATIONS: u64 = 3;
-        const TIMEOUT_SECONDS: u64 = 60;
-
-        let private_key = env::var("PRIVATE_KEY").expect("PRIVATE_KEY not set");
-        let signer: PrivateKeySigner = private_key.parse().expect("Failed to parse private key");
-        let wallet = EthereumWallet::from(signer);
+    async fn fetch_l2_block_number(&self) -> Result<U256> {
         let provider = ProviderBuilder::new()
             .with_recommended_fillers()
-            .wallet(wallet)
+            .wallet(self.wallet.clone())
             .on_http(self.l1_rpc.clone());
         let contract = DisputeGameFactory::new(self.factory_address, provider.clone());
 
-        let last_game_index_u256 = self.fetch_last_game_index().await?;
-        tracing::info!("Last game index: {:?}", last_game_index_u256);
-
-        let last_game = contract.gameAtIndex(last_game_index_u256).call().await?;
+        let last_game = contract.gameAtIndex(self.fetch_last_game_index().await?).call().await?;
 
         let last_game_address = last_game.proxy;
         tracing::info!("Last game proxy: {:?}", last_game_address);
@@ -167,6 +164,22 @@ impl OPSuccicntProposer {
 
         let l2_block_number =
             last_game_l2_block_number + U256::from(self.proposal_interval_in_blocks);
+        Ok(l2_block_number)
+    }
+
+    async fn create_game(&self) -> Result<()> {
+        const NUM_CONFIRMATIONS: u64 = 3;
+        const TIMEOUT_SECONDS: u64 = 60;
+
+        let provider = ProviderBuilder::new()
+            .with_recommended_fillers()
+            .wallet(self.wallet.clone())
+            .on_http(self.l1_rpc.clone());
+        let contract = DisputeGameFactory::new(self.factory_address, provider.clone());
+
+        let last_game_index_u256 = self.fetch_last_game_index().await?;
+        tracing::info!("Last game index: {:?}", last_game_index_u256);
+        let l2_block_number = self.fetch_l2_block_number().await?;
         let last_game_index_u32 = last_game_index_u256.to::<u32>();
         let extra_data = <(U256, u32)>::abi_encode_packed(&(l2_block_number, last_game_index_u32));
 
